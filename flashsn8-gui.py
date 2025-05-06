@@ -61,168 +61,9 @@ assert ALL_ERASED_EXPECTED_CHECKSUM == 0xa138
 ERASABLE_PAGE_COUNT = FLASHER_BASE_ADDRESS_WORDS // ERASE_BLOCK_LENGTH_WORDS
 assert ERASABLE_PAGE_COUNT == 0x50
 
+
 class UnexpectedResponse(Exception):
     pass
-
-@contextlib.contextmanager
-def timer(caption):
-    print(caption, end=' ')
-    begin = time.time()
-    try:
-        yield
-    except:
-        print('Failed')
-        raise
-    finally:
-        print('Done in %.2fs' % (time.time() - begin))
-
-
-def getCandidateDeviceList(usb, bus_address, vid_pid_list):
-    match_list = []
-    if bus_address:
-        if ':' in bus_address:
-            bus, address = bus_address.split(':')
-        else:
-            bus = ''
-            address = bus_address
-        address = int(address, 16)
-        if bus:
-            match_list.append(
-                lambda x, _expected=(int(bus, 16), address): (
-                    x.getBusNumber(),
-                    x.getDeviceAddress(),
-                ) == _expected
-            )
-        else:
-            match_list.append(lambda x: x.getDeviceAddress() == address)
-    raw_vid_pid_list = []
-    for vid_pid in vid_pid_list:
-        vid, pid = vid_pid.split(':')
-        raw_vid_pid_list.append((
-            int(vid, 16),
-            int(pid, 16),
-        ))
-    match_list.append(
-        lambda x, _expected=tuple(raw_vid_pid_list): (
-            x.getVendorID(), x.getProductID()
-        ) in _expected
-    )
-    candidate_list = []
-    for device in usb.getDeviceIterator(skip_on_error=True):
-        if all(match(device) for match in match_list):
-            candidate_list.append(device)
-    return candidate_list
-
-def hexdump(value):
-    return ' '.join('%02x' % x for x in value)
-
-def send(device, data):
-    assert len(data) == 8
-    device.controlWrite(
-        request_type=usb1.REQUEST_TYPE_CLASS | usb1.RECIPIENT_INTERFACE,
-        request=0x09, # SET_REPORT
-        value=0x0300,
-        index=0,
-        timeout=500,
-        data=data,
-    )
-
-def no_send(device, data):
-    _ = device # silence pylint
-    print('NOT sending ' + hexdump(data))
-
-def recv(device, expected):
-    result = device.controlRead(
-        request_type=usb1.REQUEST_TYPE_CLASS | usb1.RECIPIENT_INTERFACE,
-        request=0x01, # GET_REPORT
-        value=0x0300,
-        index=0,
-        timeout=500,
-        length=8,
-    )
-    if not result.startswith(expected):
-        raise UnexpectedResponse(hexdump(result))
-    return result
-
-def no_recv(device, expected):
-    _ = device # silence pylint
-    print('NOT receiving ' + hexdump(expected))
-
-def switchToFlasher(device):
-    with timer('Switching to flasher...'):
-        send(device, b'\xaa\x55\xa5\x5a\xff\x00\x33\xcc')
-
-def unlockFlash(device):
-    with timer('Unlocking flash...'):
-        send(device, b'\x01\xaa\x55\x00\x00\x00\x00\x00')
-        recv(device, b'\x01\xaa\x55\x00\x00\x03\x00\x00')
-        send(device, b'\x02\xaa\x55\x00\x12\x34\x56\x78')
-        recv(device, b'\x02\xaa\x55\x00\xfa\xfa\xfa\xfa')
-
-def getFlashUnlockState(device):
-    with timer('Getting flash lock state...'):
-        send(device, b'\x03\xaa\x55\x00\x00\x00\x00\x00')
-        return recv(device, b'\x03\xaa\x55\x00')[4:] == b'\xfa' * 4
-
-def _erase(device, base_address_words, page_count):
-    if (
-        base_address_words < 0 or
-        page_count < 1 or
-        base_address_words & 127
-    ):
-        raise ValueError(repr(base_address_words, page_count))
-    last_erased_address_words = (
-        base_address_words +
-        page_count * ERASE_BLOCK_LENGTH_WORDS
-        - 1 # Otherwise it would be first non-erased address
-    )
-    # Flasher does not protect itself, do it instead.
-    if last_erased_address_words >= FLASHER_BASE_ADDRESS_WORDS:
-        raise ValueError('Refusing to erase flasher program')
-    send(
-        device,
-        b'\x04\xaa\x55\x00' + struct.pack(
-            '<HH',
-            base_address_words,
-            page_count,
-        ),
-    )
-
-def erase(device, base_address_words, page_count):
-    # Flasher is not erasing canary page correctly (requesting an erase on
-    # CANARY_ADDRESS_WORDS instead of CANARY_PAGE_ADDRESS_WORDS), it is unclear
-    # whether that works at all.
-    with timer('Erasing %#04x to %#04x...' % (
-        base_address_words,
-        (
-            base_address_words
-            + page_count * ERASE_BLOCK_LENGTH_WORDS
-            - 1 # Otherwise it would be first non-erased address
-        ),
-    )):
-        _erase(device, base_address_words, page_count)
-
-def getChecksum(device):
-    with timer('Getting 0x0000 to 0x27ff checksum...'):
-        send(device, b'\x06\xaa\x55\x00\x00\x00\x00\x00')
-        result, = struct.unpack(
-            '<H',
-            recv(device, b'\x06\xaa\x55\x00\xfa\xfa')[6:],
-        )
-    return result
-
-def reboot(device):
-    print('Asking device to reboot...')
-    send(device, b'\x07\xaa\x55\x00\x00\x00\x00\x00')
-    # There is (should be) no answer
-
-def getCodeOptions(device):
-    with timer('Retrieving code options...'):
-        send(device, b'\x09\xaa\x55\x00\x00\x00\x00\x00')
-        options_2ffc_2ffd = recv(device, b'\x09\xaa\x55\x00')[4:]
-        send(device, b'\x09\xaa\x55\x01\x00\x00\x00\x00')
-        options_2ffe_2fff = recv(device, b'\x09\xaa\x55\x01')[4:]
-    return options_2ffc_2ffd + options_2ffe_2fff
 
 
 class FlashWorker(QThread):
@@ -237,6 +78,169 @@ class FlashWorker(QThread):
         self.device_list = device_list
         self.single      = single
 
+    @contextlib.contextmanager
+    def timer(self, caption):
+        print(caption, end=' ')
+        self.message.emit(caption)
+        begin = time.time()
+        try:
+            yield
+        except:
+            print('Failed')
+            raise
+        finally:
+            print('Done in %.2fs' % (time.time() - begin))
+            self.message.emit('Done in %.2fs' % (time.time() - begin))
+
+    def getCandidateDeviceList(self, usb, bus_address, vid_pid_list):
+        match_list = []
+        if bus_address:
+            if ':' in bus_address:
+                bus, address = bus_address.split(':')
+            else:
+                bus = ''
+                address = bus_address
+            address = int(address, 16)
+            if bus:
+                match_list.append(
+                    lambda x, _expected=(int(bus, 16), address): (
+                        x.getBusNumber(),
+                        x.getDeviceAddress(),
+                    ) == _expected
+                )
+            else:
+                match_list.append(lambda x: x.getDeviceAddress() == address)
+        raw_vid_pid_list = []
+        for vid_pid in vid_pid_list:
+            vid, pid = vid_pid.split(':')
+            raw_vid_pid_list.append((
+                int(vid, 16),
+                int(pid, 16),
+            ))
+        match_list.append(
+            lambda x, _expected=tuple(raw_vid_pid_list): (
+                x.getVendorID(), x.getProductID()
+            ) in _expected
+        )
+        candidate_list = []
+        for device in usb.getDeviceIterator(skip_on_error=True):
+            if all(match(device) for match in match_list):
+                candidate_list.append(device)
+        return candidate_list
+
+    def hexdump(self, value):
+        return ' '.join('%02x' % x for x in value)
+
+    def send(self, device, data):
+        assert len(data) == 8
+        device.controlWrite(
+            request_type=usb1.REQUEST_TYPE_CLASS | usb1.RECIPIENT_INTERFACE,
+            request=0x09, # SET_REPORT
+            value=0x0300,
+            index=0,
+            timeout=500,
+            data=data,
+        )
+
+    def no_send(self, device, data):
+        _ = device # silence pylint
+        print('NOT sending ' + self.hexdump(data))
+
+    def recv(self, device, expected):
+        result = device.controlRead(
+            request_type=usb1.REQUEST_TYPE_CLASS | usb1.RECIPIENT_INTERFACE,
+            request=0x01, # GET_REPORT
+            value=0x0300,
+            index=0,
+            timeout=500,
+            length=8,
+        )
+        if not result.startswith(expected):
+            raise UnexpectedResponse(self.hexdump(result))
+        return result
+
+    def no_recv(self, device, expected):
+        _ = device # silence pylint
+        print('NOT receiving ' + self.hexdump(expected))
+
+
+    def switchToFlasher(self, device):
+        with self.timer('Switching to flasher...'):
+            self.send(device, b'\xaa\x55\xa5\x5a\xff\x00\x33\xcc')
+
+    def unlockFlash(self, device):
+        with self.timer('Unlocking flash...'):
+            self.send(device, b'\x01\xaa\x55\x00\x00\x00\x00\x00')
+            self.recv(device, b'\x01\xaa\x55\x00\x00\x03\x00\x00')
+            self.send(device, b'\x02\xaa\x55\x00\x12\x34\x56\x78')
+            self.recv(device, b'\x02\xaa\x55\x00\xfa\xfa\xfa\xfa')
+
+    def getFlashUnlockState(self, device):
+        with self.timer('Getting flash lock state...'):
+            self.send(device, b'\x03\xaa\x55\x00\x00\x00\x00\x00')
+            return self.recv(device, b'\x03\xaa\x55\x00')[4:] == b'\xfa' * 4
+
+    def _erase(self, device, base_address_words, page_count):
+        if (
+            base_address_words < 0 or
+            page_count < 1 or
+            base_address_words & 127
+        ):
+            raise ValueError(repr(base_address_words, page_count))
+        last_erased_address_words = (
+            base_address_words +
+            page_count * ERASE_BLOCK_LENGTH_WORDS
+            - 1 # Otherwise it would be first non-erased address
+        )
+        # Flasher does not protect itself, do it instead.
+        if last_erased_address_words >= FLASHER_BASE_ADDRESS_WORDS:
+            raise ValueError('Refusing to erase flasher program')
+        self.send(
+            device,
+            b'\x04\xaa\x55\x00' + struct.pack(
+                '<HH',
+                base_address_words,
+                page_count,
+            ),
+        )
+
+    def erase(self, device, base_address_words, page_count):
+        # Flasher is not erasing canary page correctly (requesting an erase on
+        # CANARY_ADDRESS_WORDS instead of CANARY_PAGE_ADDRESS_WORDS), it is unclear
+        # whether that works at all.
+        with self.timer('Erasing %#04x to %#04x...' % (
+            base_address_words,
+            (
+                base_address_words
+                + page_count * ERASE_BLOCK_LENGTH_WORDS
+                - 1 # Otherwise it would be first non-erased address
+            ),
+        )):
+            self._erase(device, base_address_words, page_count)
+
+    def getChecksum(self, device):
+        with self.timer('Getting 0x0000 to 0x27ff checksum...'):
+            self.send(device, b'\x06\xaa\x55\x00\x00\x00\x00\x00')
+            result, = struct.unpack(
+                '<H',
+                self.recv(device, b'\x06\xaa\x55\x00\xfa\xfa')[6:],
+            )
+        return result
+
+    def getCodeOptions(self, device):
+        with self.timer('Retrieving code options...'):
+            self.send(device, b'\x09\xaa\x55\x00\x00\x00\x00\x00')
+            options_2ffc_2ffd = self.recv(device, b'\x09\xaa\x55\x00')[4:]
+            self.send(device, b'\x09\xaa\x55\x01\x00\x00\x00\x00')
+            options_2ffe_2fff = self.recv(device, b'\x09\xaa\x55\x01')[4:]
+        return options_2ffc_2ffd + options_2ffe_2fff
+
+    def reboot(self, device):
+        print('Asking device to reboot...')
+        self.message.emit('Asking device to reboot...')
+        self.send(device, b'\x07\xaa\x55\x00\x00\x00\x00\x00')
+        # There is (should be) no answer
+    
     def program(self, device, base_address_words, data):
         write_packet_count, remainder = divmod(len(data), 8)
         if remainder:
@@ -253,11 +257,11 @@ class FlashWorker(QThread):
             + len(data) // 2
             - 1 # Otherwise it would be first non-erased address
         )
-        with timer('Programming from %#04x to %#04x...' % (
+        with self.timer('Programming from %#04x to %#04x...' % (
             base_address_words,
             last_programmed_address_words,
         )):
-            send(
+            self.send(
                 device,
                 b'\x05\xaa\x55\x00' + struct.pack(
                     '<HH',
@@ -265,7 +269,7 @@ class FlashWorker(QThread):
                     write_packet_count,
                 ),
             )
-            recv(
+            self.recv(
                 device,
                 b'\x05\xaa\x55\x00\xfa\xfa\xfa\xfa',
             )
@@ -278,7 +282,7 @@ class FlashWorker(QThread):
                 sending_offset += 8
                 while True:
                     try:
-                        send(device, data[:8])
+                        self.send(device, data[:8])
                         # Flash packet is acked immediately, but firmware seems to
                         # clear USB interrupt at a different time, causing next
                         # transmission to be permanently lost. So sleep for 1ms,
@@ -331,7 +335,7 @@ class FlashWorker(QThread):
         ) & 0xffff
 
         with usb1.USBContext() as usb:
-            found_devices = getCandidateDeviceList(
+            found_devices = self.getCandidateDeviceList(
                 usb=usb,
                 bus_address=[self.single] if self.single else None,
                 vid_pid_list=self.device_list,
@@ -371,31 +375,31 @@ class FlashWorker(QThread):
                 handle.claimInterface(0)
 
             try:
-                unlocked = getFlashUnlockState(handle)
+                unlocked = self.getFlashUnlockState(handle)
             except UnexpectedResponse:
                 print('Not in flasher mode. Switching...')
                 self.message.emit('Not in flasher mode. Switching...')
-                switchToFlasher(handle)
-                unlocked = getFlashUnlockState(handle)
+                self.switchToFlasher(handle)
+                unlocked = self.getFlashUnlockState(handle)
 
             if not unlocked:
                 print('Unlocking flash...')
                 self.message.emit('Unlocking flash...')
-                unlockFlash(handle)
-                if not getFlashUnlockState(handle):
+                self.unlockFlash(handle)
+                if not self.getFlashUnlockState(handle):
                     self.error.emit('Failed to unlock flash.')
                     raise RuntimeError('Failed to unlock flash.')
 
-            if getCodeOptions(handle) != image_code_options:
+            if self.getCodeOptions(handle) != image_code_options:
                 self.error.emit('Code option mismatch between flash and image.')
                 raise ValueError('Code option mismatch between flash and image.')
 
-            erase(handle, 0, ERASABLE_PAGE_COUNT)
+            self.erase(handle, 0, ERASABLE_PAGE_COUNT)
             time.sleep(2.5)
 
             while True:
                 try:
-                    erased_checksum = getChecksum(handle)
+                    erased_checksum = self.getChecksum(handle)
                     break
                 except usb1.USBErrorTimeout:
                     continue
@@ -411,13 +415,13 @@ class FlashWorker(QThread):
                 )
 
             self.program(handle, 0x0008, image)
-            checksum = getChecksum(handle)
+            checksum = self.getChecksum(handle)
 
             if checksum != all_programmed_expected_checksum:
                 print('Checksum mismatch after programming. Attempting re-erase.')
                 self.message.emit("Checksum mismatch after programming. Attempting re-erase.")
-                with timer('Re-erasing...'):
-                    erase(handle, 0, ERASABLE_PAGE_COUNT)
+                with self.timer('Re-erasing...'):
+                    self.erase(handle, 0, ERASABLE_PAGE_COUNT)
                 self.error.emit(
                     f'Post-program checksum mismatch: expected '
                     f'{all_programmed_expected_checksum:#04x}, got {checksum:#04x}'
@@ -429,8 +433,9 @@ class FlashWorker(QThread):
 
             print('Success!')
             self.message.emit("Success!")
+            self.reboot(handle)
+            time.sleep(0.5)
             self.finished.emit()
-            reboot(handle)
 
 
 class ProgressApp(QWidget):
@@ -478,6 +483,7 @@ class ProgressApp(QWidget):
         self.worker.finished.connect(self.enable_finish)
 
         self.start_button.setEnabled(False)
+        self.finish_button.setEnabled(False)
         self.message_box.clear()
         self.progress_label.setText("0/100")
         self.worker.start()
@@ -490,7 +496,7 @@ class ProgressApp(QWidget):
 
     def show_error(self, msg):
         self.message_box.append(f"Error: {msg}")
-        self.finish_button.setEnabled(True)
+        # self.finish_button.setEnabled(True)
 
     def enable_finish(self):
         self.finish_button.setEnabled(True)
